@@ -30,6 +30,7 @@ TODO: Add long description of the pod here.aaa
 
   s.ios.deployment_target = '8.0'
 
+  s.vendored_frameworks = 'Frameworks/mars.framework'
   s.source_files = 'Pod/Classes/**/*'
 
   # s.public_header_files = 'Pod/Classes/**/*.h'
