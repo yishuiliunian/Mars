@@ -20,6 +20,7 @@
 
 #import <Mars/mars/stn/stn.h>
 #include "longlink_packer.h"
+#define LONGLINK_UNPACK_NEXTFRAME  (-11)
 
 #ifdef __APPLE__
 #include "mars/comm/autobuffer.h"
@@ -27,12 +28,17 @@
 #import "YHSendMessage.h"
 #import "YHCmd.h"
 #import "YHCodecWrapper.h"
+#import "MarsNetService.h"
+#import "YHReadBuffer.h"
+#import "YHFromMessage.h"
 
 #else
 #include "comm/autobuffer.h"
 #include "comm/xlogger/xlogger.h"
 #include "comm/socket/unix_socket.h"
 #endif
+
+
 
 static uint32_t sg_client_version = 0;
 #define NOOP_CMDID 6
@@ -78,14 +84,57 @@ void longlink_pack(uint32_t _cmdid, uint32_t _seq, const void* _raw, size_t _raw
 
 
 int longlink_unpack(const AutoBuffer& _packed, uint32_t& _cmdid, uint32_t& _seq, size_t& _package_len, AutoBuffer& _body) {
-   size_t body_len = 0;
-   int ret = __unpack_test(_packed.Ptr(), _packed.Length(), _cmdid,  _seq, _package_len, body_len);
-    
-    if (LONGLINK_UNPACK_OK != ret) return ret;
-    
-    _body.Write(AutoBuffer::ESeekCur, _packed.Ptr(_package_len-body_len), body_len);
-    
-    return ret;
+    //
+    static NSRecursiveLock * lock;
+    static NSMutableArray * decodeMsgs;
+    static YHReadBuffer * restReadBuffer;
+    //
+    static  dispatch_once_t once;
+    dispatch_once(&once, ^{
+        lock = [NSRecursiveLock new];
+        decodeMsgs = [NSMutableArray new];
+    });
+    //
+
+    YHFromMessage* msg = nil;
+    int restMsgCount = 0;
+    [lock lock];
+    if (decodeMsgs.count) {
+        msg = [decodeMsgs firstObject];
+        [decodeMsgs removeObjectAtIndex:0];
+        restMsgCount = decodeMsgs.count;
+    }
+    [lock unlock];
+    //
+    if (msg) {
+        _cmdid = CMDID_GLOBAL_YOHE;
+        _seq = msg.seq;
+        _package_len = msg.originDataLength;
+        _body.AllocWrite(msg.data.length);
+        _body.Write(msg.data.bytes, msg.data.length);
+        if (restMsgCount == 0) {
+            return LONGLINK_UNPACK_OK;
+        } else {
+            return LONGLINK_UNPACK_NEXTFRAME;
+        }
+    } else if (restReadBuffer) {
+        _cmdid = CMDID_GLOBAL_YOHE;
+        _package_len = restReadBuffer.receivedDataLength + 4;
+        _body.AllocWrite(_packed.Length());
+        _body.Write(_packed.Pos(), _packed.Length());
+        return LONGLINK_UNPACK_CONTINUE;
+    } else {
+        YHReadBuffer * buffer = [YHReadBuffer new];
+        YHReadBuffer * restBuffer = nil;
+        NSArray <YHFromMessage*>* msgs = [[MarsNetService shareInstance] decodeServerPack:buffer serverBuffer:_packed.Ptr(0) serverLength:_packed.Length() restBuffer:&restBuffer];
+        if (msgs.count > 0) {
+            [lock lock];
+            [decodeMsgs addObjectsFromArray:msgs];
+            [lock unlock];
+        }
+        return LONGLINK_UNPACK_NEXTFRAME;
+    }
+
 }
 
 /**

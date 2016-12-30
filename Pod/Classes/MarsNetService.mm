@@ -9,8 +9,10 @@
 #import "YHRequest.h"
 #import "MarsAppCallback.h"
 #import "MarsSTNCallback.h"
+#import "YHSendMessage.h"
 #import "stnproto_logic.h"
 #import "YHCmd.h"
+#import "YHReadBuffer.h"
 #import <YHNetCore/YHDNS.h>
 #import <YHNetCore/YHSendMessage.h>
 #import <YHProtoBuff/GPBMessage.h>
@@ -138,9 +140,10 @@ appender_set_console_log(false);
     YHFromMessage * (^BuildMessage)(YHReadBuffer * buffer) = ^(YHReadBuffer * buffer) {
         if (buffer.isFull) {
             YHFromMessage * msg = [YHCodecWrapper decode:buffer.bufferData];
+            msg.originDataLength = buffer.receivedDataLength;
             return msg;
         } else {
-            return nil;
+            return (YHFromMessage *)nil;
         }
     };
 
@@ -153,61 +156,32 @@ appender_set_console_log(false);
             [msgs addObject:fromMessage];
         }
     } else {
-
-    }
-
-
-
-
-
-
-}
-
-- (void) deallWithBuffer:(uint8_t*)buffer length:(int64_t)length
-{
-
-    if (length == NSNotFound) {
-        return;
-    }
-    void(^CheckFull)(void) = ^(void) {
-        // if the read buffer is full ,then decode it. Otherwise do nothing , but just wait the next package
-        if (_readBuffer.isFull) {
-            NSData* data = _readBuffer.bufferData;
-            YHFromMessage* msg = [YHCodecWrapper decode:data];
-
-            if ([self.delegate respondsToSelector:@selector(connection:getFromMessage:)]) {
-                [self.delegate connection:self getFromMessage:msg];
-            }
-            _readBuffer = nil;
+        int32_t readLength = (aimLength - readBuffer.receivedDataLength);
+        [readBuffer appendBytes:readBufferPoint length:readLength];
+        YHFromMessage * fromMessage = BuildMessage(readBuffer);
+        if (fromMessage) {
+            [msgs addObject:fromMessage];
         }
-    };
 
-    uint8_t * readBufferPoint = buffer;
-    uint32_t aimLength = 0;
-    if (!_readBuffer) {
-        _readBuffer = [YHReadBuffer new];
-        aimLength = byteToInt2(buffer);
-        readBufferPoint += 4;
-        aimLength -= 4;
-        length -= 4;
-        _readBuffer.aimDataLength = aimLength;
-    } else {
-        aimLength = _readBuffer.aimDataLength;
-    }
-    DDLogInfo(@"ReadBuffer AimLength:[%lld] CurrentLength:[%lld]", _readBuffer.aimDataLength, _readBuffer.receivedDataLength);
-    if (0 <length && ( _readBuffer.receivedDataLength + length < aimLength)) {
-        [_readBuffer appendBytes:readBufferPoint length:length];
-    } else if (_readBuffer.receivedDataLength + length == aimLength) {
-        [_readBuffer appendBytes:readBufferPoint length:length];
-        CheckFull();
-    } else {
-        int32_t readLength = (aimLength - _readBuffer.receivedDataLength);
-        [_readBuffer appendBytes:readBufferPoint length:readLength];
-        CheckFull();
-        if (length - readLength < 0) {
-            return;
+        uint8_t * restBufferPoint = readBufferPoint + readLength;
+        int64_t  restBufferLength = length - readLength;
+
+        uint32_t nextFrameLength = byteToInt2(restBufferPoint);
+        if (nextFrameLength > restBufferLength) {
+            if (restBuffer != NULL) {
+                *restBuffer= [YHReadBuffer new];
+                restBufferPoint = restBufferPoint +  packHeadLength;
+                nextFrameLength -= packHeadLength;
+                readBuffer.aimDataLength = aimLength;
+                [*restBuffer setAimDataLength:nextFrameLength];
+                [*restBuffer appendBytes:restBufferPoint length:restBufferLength];
+            }
         } else {
-            [self deallWithBuffer:readBufferPoint+readLength length:length-readLength];
+            YHReadBuffer * appendBuffer = [YHReadBuffer new];
+            NSArray * messages = [self decodeServerPack:appendBuffer serverBuffer:readBufferPoint+readLength serverLength:length - readLength restBuffer:restBuffer];
+            if (messages.count) {
+                [msgs addObjectsFromArray:messages];
+            }
         }
     }
 }
